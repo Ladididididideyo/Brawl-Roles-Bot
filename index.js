@@ -140,7 +140,7 @@ async function registerCommands() {
 const { HttpsProxyAgent } = require('https-proxy-agent');
 
 const proxyAgent = new HttpsProxyAgent(
-  `https://${process.env.DECODO_USER}:${process.env.DECODO_PASS}@isp.decodo.com:${process.env.DECODO_PORT}`
+  `https://${process.env.DECODO_USER}:${process.env.DECODO_PASS}@${process.env.STATIC_IP_ADDRESS}:${process.env.DECODO_PORT}`
 );
 
 async function fetchBrawlStarsAPI(tag, apiKey) {
