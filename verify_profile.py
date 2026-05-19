@@ -50,8 +50,14 @@ def main():
 
     image_path = sys.argv[1]
     image = cv2.imread(image_path)
+
+    # Fallback: read raw bytes and decode via numpy (handles edge-case formats)
     if image is None:
-        print(json.dumps({"error": f"Could not read image: {image_path}"}))
+        raw = np.frombuffer(open(image_path, 'rb').read(), dtype=np.uint8)
+        image = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+
+    if image is None:
+        print(json.dumps({"error": f"Could not decode image: {image_path}"}))
         sys.exit(1)
 
     details = {}
