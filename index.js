@@ -115,8 +115,7 @@ const commands = [
     .setDescription('Verify your Brawl Stars account via screenshot + API, then assign roles')
     .addStringOption(o =>
       o.setName('tag').setDescription('Your player tag e.g. #2V89QJL8VY').setRequired(true))
-    .addStringOption(o =>
-      o.setName('apikey').setDescription('Your Brawl Stars API key from developer.brawlstars.com').setRequired(true))
+    // apikey option removed — key is now read from BRAWL_API_KEY env variable
     .addAttachmentOption(o =>
       o.setName('screenshot').setDescription('Screenshot of YOUR profile — must show your #tag on screen').setRequired(true)),
 
@@ -329,8 +328,18 @@ discord.on('interactionCreate', async interaction => {
     await interaction.deferReply({ ephemeral: true });
     try {
       const tag        = interaction.options.getString('tag');
-      const apiKey     = interaction.options.getString('apikey');
       const screenshot = interaction.options.getAttachment('screenshot');
+
+      // Read API key from environment — never from user input
+      const apiKey = process.env.BRAWL_API_KEY;
+      if (!apiKey) {
+        return await interaction.editReply({
+          embeds: [new EmbedBuilder()
+            .setColor(0xe74c3c)
+            .setTitle('❌  Configuration Error')
+            .setDescription('`BRAWL_API_KEY` is not set on the server. Contact the bot owner.')],
+        });
+      }
 
       // ── Step 1: OpenCV + OCR — confirm own profile AND tag in one Python call ──
       const cvResult = await verifyOwnProfile(screenshot.url, tag);
@@ -378,7 +387,7 @@ discord.on('interactionCreate', async interaction => {
       // ── Step 2: Fetch stats from the official API ─────────────────────────────
       const player = await fetchBrawlStarsAPI(tag, apiKey);
 
-      // ── Step 4: Assign roles ──────────────────────────────────────────────────
+      // ── Step 3: Assign roles ──────────────────────────────────────────────────
       let roleLog = null;
       if (interaction.guild && interaction.member?.roles) {
         roleLog = await assignRoles(interaction.member, player.trophies, player.highestAllTimeRankedElo ?? null);
