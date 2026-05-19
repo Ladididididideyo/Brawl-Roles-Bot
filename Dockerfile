@@ -2,11 +2,12 @@ FROM node:18-slim
 
 # Install Python, OpenCV dependencies, and required system libraries
 RUN apt-get update && apt-get install -y \
-    python3 \
-    python3-pip \
-    libgl1 \
-    libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+  python3 \
+  python3-pip \
+  libgl1 \
+  libglib2.0-0 \
+  tesseract-ocr \
+  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
