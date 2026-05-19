@@ -10,9 +10,13 @@ WORKDIR /app
 
 # Copy package files
 COPY package*.json ./
+COPY requirements.txt ./
 
 # Install Node dependencies
 RUN npm install --omit=dev
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
