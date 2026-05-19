@@ -2,6 +2,7 @@ const {
   Client, GatewayIntentBits, REST, Routes,
   SlashCommandBuilder, EmbedBuilder,
   ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle,
+  ModalBuilder, TextInputBuilder, TextInputStyle,
   PermissionFlagsBits,
 } = require('discord.js');
 const axios      = require('axios');
@@ -17,7 +18,7 @@ const os         = require('os');
 require('dotenv').config();
 
 // ── Client ────────────────────────────────────────────────────────────────────
-const discord = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
+const discord = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 // ── PostgreSQL pool ───────────────────────────────────────────────────────────
 // Railway injects DATABASE_URL automatically when you add the Postgres plugin.
@@ -146,22 +147,31 @@ async function fetchBrawlStarsAPI(tag, apiKey) {
 }
 
 // ── OpenCV own-profile detection (Python sidecar) ────────────────────────────
-/**
- * Downloads the screenshot to a temp file, runs verify_profile.py via Python,
- * parses the JSON result, and cleans up.
- * Returns { ownProfile: bool, confidence: float, details: object }
- */
 async function verifyOwnProfile(imageUrl) {
-  // Download image to a temp file
   const resp   = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 15000 });
+
+  // Detect extension from Content-Type so OpenCV gets a readable file
+  const contentType = resp.headers['content-type'] || 'image/png';
+  const ext = contentType.includes('jpeg') ? '.jpg'
+            : contentType.includes('webp') ? '.webp'
+            : '.png';
+
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'bsbot-'));
-  const tmpImg = path.join(tmpDir, 'screenshot.png');
+  const tmpImg = path.join(tmpDir, `screenshot${ext}`);
   await fsp.writeFile(tmpImg, Buffer.from(resp.data));
 
   try {
     const scriptPath = path.join(__dirname, 'verify_profile.py');
-    const { stdout } = await execFileAsync('python3', [scriptPath, tmpImg], { timeout: 30000 });
-    return JSON.parse(stdout.trim());
+    const { stdout, stderr } = await execFileAsync('python3', [scriptPath, tmpImg], { timeout: 30000 });
+    if (stderr) console.error('[verify_profile stderr]', stderr);
+    console.log('[verify_profile stdout]', stdout.trim());
+    const result = JSON.parse(stdout.trim());
+    if (result.error) console.error('[verify_profile error]', result.error);
+    // If Python returned an error object, treat as unverifiable rather than crashing
+    if (result.error || result.details === undefined) {
+      return { ownProfile: false, confidence: 0, details: {}, pythonError: result.error ?? 'no details returned' };
+    }
+    return result;
   } finally {
     await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
@@ -351,11 +361,14 @@ discord.on('interactionCreate', async interaction => {
       const cvResult = await verifyOwnProfile(screenshot.url);
 
       if (!cvResult.ownProfile) {
-        // Build a detail breakdown so user understands what failed
         const detailLines = Object.entries(cvResult.details).map(([k, v]) => {
           const found = v >= 0.75;
           return `${found ? '✅' : '❌'} ${k.replace(/_/g, ' ')}: \`${(v * 100).toFixed(1)}%\``;
         }).join('\n');
+
+        const debugInfo = cvResult.pythonError
+          ? `\n\n⚠️ **Python error:** \`${cvResult.pythonError}\``
+          : (detailLines ? `\n\n**Element detection scores:**\n${detailLines}` : '');
 
         return await interaction.editReply({
           embeds: [new EmbedBuilder()
@@ -363,9 +376,8 @@ discord.on('interactionCreate', async interaction => {
             .setTitle('❌  Not Your Profile')
             .setDescription(
               `The screenshot does not appear to be your **own** Brawl Stars profile.\n\n` +
-              `Own profiles show gear icons ⚙️, a colour picker 🎨, and a QR code button — none of these were detected.\n\n` +
-              `**Element detection scores:**\n${detailLines}\n\n` +
-              `Please submit a screenshot of your own profile page, not someone else's.`
+              `Own profiles show gear icons ⚙️, a colour picker 🎨, and a QR code button — none of these were detected.` +
+              debugInfo + `\n\nPlease submit a screenshot of your own profile page, not someone else's.`
             )
             .setFooter({ text: `Confidence: ${(cvResult.confidence * 100).toFixed(1)}% (need ≥60%) • No roles assigned` })]
         });
