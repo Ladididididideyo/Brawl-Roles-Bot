@@ -65,56 +65,50 @@ def edit_distance(s1, s2):
 
 
 def ocr_tag(image):
-    """
-    Crops the tag region, preprocesses with CLAHE contrast enhancement,
-    tries multiple threshold values, and returns the longest valid tag read.
-
-    FIX: The tag (#XXXXXXXX) lives at roughly 19-25% down the image height
-    in the left panel — the old code was scanning 28-33% and missing it entirely.
-    We now scan a wider vertical band (17-32%) and take 35% of the width.
-    """
     ih, iw = image.shape[:2]
     best_text = ''
 
-    # Scan from ~17% to ~32% down — covers the tag position across different
-    # device resolutions and aspect ratios.
-    # OLD: range was [0.285 … 0.335] which was below the tag entirely.
-    scan_fracs = [0.17, 0.18, 0.19, 0.20, 0.21, 0.22, 0.23, 0.24, 0.25,
-                  0.26, 0.27, 0.28, 0.29, 0.30, 0.31, 0.32]
+    # The tag lives in the LEFT panel only (~left 48% of image)
+    # and sits near the BOTTOM of the player card art area (~72-85% down)
+    left_panel = image[0:ih, 0:int(iw * 0.48)]
+    lh, lw = left_panel.shape[:2]
+
+    scan_fracs = [0.70, 0.72, 0.74, 0.76, 0.78, 0.80, 0.82, 0.84]
 
     for frac in scan_fracs:
-        y0 = int(ih * frac)
-        y1 = y0 + max(40, int(ih * 0.045))
-        # OLD: iw * 0.30 — slightly too narrow; bumped to 0.35
-        crop = image[y0:y1, 0:int(iw * 0.35)]
+        y0 = int(lh * frac)
+        y1 = y0 + max(30, int(lh * 0.05))
+        crop = left_panel[y0:y1, 0:int(lw * 0.70)]
 
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-
-        # CLAHE boosts local contrast — essential for the Nougat font on blue bg
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
+        clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
         enhanced = clahe.apply(gray)
 
-        for thresh_val in [110, 120, 130, 140, 150]:
-            _, thresh = cv2.threshold(enhanced, thresh_val, 255, cv2.THRESH_BINARY)
-            up = cv2.resize(thresh, None, fx=5, fy=5, interpolation=cv2.INTER_CUBIC)
-            padded = cv2.copyMakeBorder(up, 40, 40, 40, 40, cv2.BORDER_CONSTANT, value=0)
+        # White text on dark background — use THRESH_BINARY_INV
+        for thresh_val in [80, 100, 120, 140]:
+            _, thresh = cv2.threshold(
+                enhanced, thresh_val, 255, cv2.THRESH_BINARY_INV
+            )
+            up = cv2.resize(thresh, None, fx=6, fy=6, interpolation=cv2.INTER_CUBIC)
+            padded = cv2.copyMakeBorder(up, 60, 60, 60, 60, cv2.BORDER_CONSTANT, value=255)
 
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
                 tmp = f.name
             cv2.imwrite(tmp, padded)
 
+            # Save debug crops so you can inspect what Tesseract sees
+            debug_path = f'/tmp/bsbot_debug_{int(frac*100)}_{thresh_val}.png'
+            cv2.imwrite(debug_path, padded)
+
             try:
                 r = subprocess.run(
-                    ['tesseract', tmp, 'stdout', '--psm', '7',
+                    ['tesseract', tmp, 'stdout', '--psm', '6',
                      '-c', f'tessedit_char_whitelist={BRAWL_CHARS}'],
                     capture_output=True, text=True, timeout=10
                 )
                 text = r.stdout.strip().upper().replace(' ', '')
-
-                # Keep the longest result that looks like a tag
                 if text.startswith('#') and len(text) >= 5 and len(text) > len(best_text):
                     best_text = text
-
             except Exception:
                 pass
             finally:
@@ -122,7 +116,6 @@ def ocr_tag(image):
                 except: pass
 
     return best_text
-
 
 def normalise_tag(tag):
     """
