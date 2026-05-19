@@ -68,8 +68,6 @@ def ocr_tag(image):
     ih, iw = image.shape[:2]
     best_text = ''
 
-    # The tag lives in the LEFT panel only (~left 48% of image)
-    # and sits near the BOTTOM of the player card art area (~72-85% down)
     left_panel = image[0:ih, 0:int(iw * 0.48)]
     lh, lw = left_panel.shape[:2]
 
@@ -84,7 +82,6 @@ def ocr_tag(image):
         clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
         enhanced = clahe.apply(gray)
 
-        # White text on dark background — use THRESH_BINARY_INV
         for thresh_val in [80, 100, 120, 140]:
             _, thresh = cv2.threshold(
                 enhanced, thresh_val, 255, cv2.THRESH_BINARY_INV
@@ -96,10 +93,6 @@ def ocr_tag(image):
                 tmp = f.name
             cv2.imwrite(tmp, padded)
 
-            # Save debug crops so you can inspect what Tesseract sees
-            debug_path = f'/tmp/bsbot_debug_{int(frac*100)}_{thresh_val}.png'
-            cv2.imwrite(debug_path, padded)
-
             try:
                 r = subprocess.run(
                     ['tesseract', tmp, 'stdout', '--psm', '6',
@@ -107,15 +100,19 @@ def ocr_tag(image):
                     capture_output=True, text=True, timeout=10
                 )
                 text = r.stdout.strip().upper().replace(' ', '')
+                # Log every attempt to Railway
+                print(f'[ocr_tag] frac={frac} thresh={thresh_val} raw={repr(r.stdout.strip())} cleaned={repr(text)}', file=sys.stderr)
                 if text.startswith('#') and len(text) >= 5 and len(text) > len(best_text):
                     best_text = text
-            except Exception:
-                pass
+            except Exception as e:
+                print(f'[ocr_tag] frac={frac} thresh={thresh_val} ERROR={e}', file=sys.stderr)
             finally:
                 try: os.unlink(tmp)
                 except: pass
 
+    print(f'[ocr_tag] best_text={repr(best_text)}', file=sys.stderr)
     return best_text
+    
 
 def normalise_tag(tag):
     """
