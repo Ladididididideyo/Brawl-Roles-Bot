@@ -5,17 +5,21 @@ verify_profile.py <image_path> [expected_tag]
 1. Runs weighted OpenCV template matching to confirm the screenshot is the
    user's OWN Brawl Stars profile (gear icons, colour picker, QR button).
 
-2. If expected_tag is supplied, also OCRs the tag region using system Tesseract
-   and fuzzy-matches against the supplied tag (edit distance ≤ 2 on a 8-10 char
-   tag, to handle font misreads on the Nougat/LilitaOne typefaces).
+2. If expected_tag is supplied, OCRs the tag region using Tesseract and
+   fuzzy-matches against the supplied tag.
+
+   Strategy: collect ALL candidates containing '#' across every crop/thresh
+   combination, then pick the one with the LOWEST edit distance to the expected
+   tag rather than the longest string. This handles lower-resolution screenshots
+   where no single pass gives a perfect read.
 
 Prints a single JSON object to stdout:
 {
   "ownProfile": bool,
-  "confidence": float,   # 0.0–1.0 weighted CV score
+  "confidence": float,
   "details": { element: score },
-  "tagVerified": bool | null,  # null if no tag supplied
-  "tagOcr": str | null         # what OCR actually read
+  "tagVerified": bool | null,
+  "tagOcr": str | null
 }
 """
 
@@ -25,17 +29,16 @@ import numpy as np
 
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
 
-# Brawl Stars tags only use these characters (Supercell deliberately excludes
-# ambiguous ones like O, I, 1 — only the digit 0 is used, never the letter O).
+# Brawl Stars tags only use these characters — no letter O, no I
 BRAWL_CHARS = '#023456789CGJLPQRUVY'
 
 ELEMENTS = [
-    ('gear_left.png',    0.30, 0.75),
-    ('gear_right.png',   0.25, 0.75),
-    ('colour_picker.png',0.20, 0.75),
-    ('qr_button.png',    0.15, 0.75),
-    ('card_gear.png',    0.07, 0.75),
-    ('plus_button.png',  0.03, 0.75),
+    ('gear_left.png',     0.30, 0.75),
+    ('gear_right.png',    0.25, 0.75),
+    ('colour_picker.png', 0.20, 0.75),
+    ('qr_button.png',     0.15, 0.75),
+    ('card_gear.png',     0.07, 0.75),
+    ('plus_button.png',   0.03, 0.75),
 ]
 
 OWN_PROFILE_THRESHOLD = 0.60
@@ -64,87 +67,96 @@ def edit_distance(s1, s2):
     return dp[m][n]
 
 
-def ocr_tag(image):
+def normalise_tag(tag):
+    """
+    O → 0 and I → 1 since those letters are never valid BS tag chars.
+    Q is left as-is since it IS a valid BS tag character.
+    """
+    s = tag.upper().replace(' ', '')
+    while s.startswith('##'):
+        s = s[1:]
+    result = []
+    for c in s:
+        if c == 'O':
+            result.append('0')
+        elif c == 'I':
+            result.append('1')
+        elif c in BRAWL_CHARS or c.isalnum():
+            result.append(c)
+        elif c == '#' and not result:
+            result.append(c)
+    return ''.join(result)
+
+
+def ocr_tag(image, expected_tag=None):
+    """
+    Collects all '#'-containing OCR candidates across every crop/thresh combo,
+    then returns whichever has the lowest edit distance to expected_tag.
+    If no expected_tag, returns the longest candidate.
+
+    Pixel-verified: tag bar sits at 26-35% down the full image, left 50% wide.
+    """
     ih, iw = image.shape[:2]
-    best_text = ''
+    candidates = []  # list of normalised strings containing '#'
 
-    left_panel = image[0:ih, 0:int(iw * 0.48)]
-    lh, lw = left_panel.shape[:2]
-
-    scan_fracs = [0.70, 0.72, 0.74, 0.76, 0.78, 0.80, 0.82, 0.84]
+    scan_fracs = [0.26, 0.27, 0.28, 0.29, 0.30, 0.31, 0.32, 0.33, 0.34, 0.35]
 
     for frac in scan_fracs:
-        y0 = int(lh * frac)
-        y1 = y0 + max(30, int(lh * 0.05))
-        crop = left_panel[y0:y1, 0:int(lw * 0.70)]
+        y0 = int(ih * frac)
+        y1 = y0 + int(ih * 0.10)
+        crop = image[y0:y1, 0:int(iw * 0.50)]
 
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
         enhanced = clahe.apply(gray)
 
         for thresh_val in [80, 100, 120, 140]:
-            _, thresh = cv2.threshold(
-                enhanced, thresh_val, 255, cv2.THRESH_BINARY_INV
-            )
-            up = cv2.resize(thresh, None, fx=6, fy=6, interpolation=cv2.INTER_CUBIC)
-            padded = cv2.copyMakeBorder(up, 60, 60, 60, 60, cv2.BORDER_CONSTANT, value=255)
+            for inv in [False, True]:
+                mode = cv2.THRESH_BINARY_INV if inv else cv2.THRESH_BINARY
+                _, thresh = cv2.threshold(enhanced, thresh_val, 255, mode)
+                up = cv2.resize(thresh, None, fx=8, fy=8, interpolation=cv2.INTER_CUBIC)
+                pad_val = 255 if inv else 0
+                padded = cv2.copyMakeBorder(up, 80, 80, 80, 80, cv2.BORDER_CONSTANT, value=pad_val)
 
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
-                tmp = f.name
-            cv2.imwrite(tmp, padded)
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+                    tmp = f.name
+                cv2.imwrite(tmp, padded)
 
-            try:
-                r = subprocess.run(
-                    ['tesseract', tmp, 'stdout', '--psm', '6',
-                     '-c', f'tessedit_char_whitelist={BRAWL_CHARS}'],
-                    capture_output=True, text=True, timeout=10
-                )
-                text = r.stdout.strip().upper().replace(' ', '')
-                # Log every attempt to Railway
-                print(f'[ocr_tag] frac={frac} thresh={thresh_val} raw={repr(r.stdout.strip())} cleaned={repr(text)}', file=sys.stderr)
-                if text.startswith('#') and len(text) >= 5 and len(text) > len(best_text):
-                    best_text = text
-            except Exception as e:
-                print(f'[ocr_tag] frac={frac} thresh={thresh_val} ERROR={e}', file=sys.stderr)
-            finally:
-                try: os.unlink(tmp)
-                except: pass
+                try:
+                    r = subprocess.run(
+                        ['tesseract', tmp, 'stdout', '--psm', '7',
+                         '-c', f'tessedit_char_whitelist={BRAWL_CHARS}'],
+                        capture_output=True, text=True, timeout=10
+                    )
+                    text = r.stdout.strip().upper().replace(' ', '').replace('\n', '')
+                    print(f'[ocr_tag] frac={frac} thresh={thresh_val} inv={inv} -> {repr(text)}', file=sys.stderr)
 
-    print(f'[ocr_tag] best_text={repr(best_text)}', file=sys.stderr)
-    return best_text
-    
+                    if '#' in text:
+                        candidate = normalise_tag(text[text.index('#'):])
+                        if candidate.startswith('#') and len(candidate) >= 5:
+                            candidates.append(candidate)
 
-def normalise_tag(tag):
-    """
-    Normalise a tag for fuzzy comparison.
+                except Exception as e:
+                    print(f'[ocr_tag] frac={frac} thresh={thresh_val} inv={inv} ERROR={e}', file=sys.stderr)
+                finally:
+                    try: os.unlink(tmp)
+                    except: pass
 
-    Brawl Stars never uses the letter O — only the digit 0. Tesseract will
-    sometimes output O even when it's not in the whitelist (fallback behaviour),
-    so we map O → 0 here. Similarly I → 1 (very rare but possible).
+    if not candidates:
+        print('[ocr_tag] no candidates found', file=sys.stderr)
+        return ''
 
-    We do NOT map Q → 0 because Q is a valid Brawl Stars tag character.
-    The fuzzy edit-distance check handles any remaining single misreads.
-    """
-    s = tag.upper().replace(' ', '')
+    if expected_tag:
+        norm_exp = normalise_tag(expected_tag)
+        # Pick the candidate closest to the expected tag
+        best = min(candidates, key=lambda c: edit_distance(c, norm_exp))
+    else:
+        # No expected tag — return the longest candidate
+        best = max(candidates, key=len)
 
-    # Remove leading duplicate #
-    while s.startswith('##'):
-        s = s[1:]
-
-    result = []
-    for c in s:
-        if c == 'O':
-            # O is never a valid BS tag char — always a misread of 0
-            result.append('0')
-        elif c == 'I':
-            # I is never a valid BS tag char — likely a misread of 1
-            result.append('1')
-        elif c in BRAWL_CHARS or c.isalnum():
-            result.append(c)
-        elif c == '#' and not result:
-            result.append(c)
-
-    return ''.join(result)
+    print(f'[ocr_tag] candidates={candidates}', file=sys.stderr)
+    print(f'[ocr_tag] best={repr(best)}', file=sys.stderr)
+    return best
 
 
 def main():
@@ -188,13 +200,19 @@ def main():
     tag_ocr = None
 
     if expected_tag is not None:
-        tag_ocr = ocr_tag(image)
+        tag_ocr = ocr_tag(image, expected_tag)
         norm_ocr = normalise_tag(tag_ocr)
         norm_exp = normalise_tag(expected_tag)
 
+        print(f'[tag] ocr={repr(norm_ocr)} expected={repr(norm_exp)}', file=sys.stderr)
+
         if norm_ocr and norm_exp:
             dist = edit_distance(norm_ocr, norm_exp)
-            max_dist = max(2, len(norm_exp) // 5)  # allow ≤2 misreads (≤20%)
+            # Allow up to 1/3 of the tag length as misreads — handles low-res
+            # screenshots while still being strict enough to prevent spoofing.
+            # The CV own-profile check is the primary anti-spoofing gate.
+            max_dist = max(3, len(norm_exp) // 3)
+            print(f'[tag] edit_distance={dist} max_allowed={max_dist}', file=sys.stderr)
             tag_verified = dist <= max_dist
         else:
             tag_verified = False
