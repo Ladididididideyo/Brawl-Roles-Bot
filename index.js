@@ -7,7 +7,6 @@ const {
 } = require('discord.js');
 const axios      = require('axios');
 const { Pool }   = require('pg');
-const Tesseract  = require('tesseract.js');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
@@ -147,7 +146,7 @@ async function fetchBrawlStarsAPI(tag, apiKey) {
 }
 
 // ── OpenCV own-profile detection (Python sidecar) ────────────────────────────
-async function verifyOwnProfile(imageUrl) {
+async function verifyOwnProfile(imageUrl, expectedTag = null) {
   const resp   = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 15000 });
 
   // Detect extension from Content-Type so OpenCV gets a readable file
@@ -162,43 +161,19 @@ async function verifyOwnProfile(imageUrl) {
 
   try {
     const scriptPath = path.join(__dirname, 'verify_profile.py');
-    const { stdout, stderr } = await execFileAsync('python3', [scriptPath, tmpImg], { timeout: 30000 });
+    const args = expectedTag ? [scriptPath, tmpImg, expectedTag] : [scriptPath, tmpImg];
+    const { stdout, stderr } = await execFileAsync('python3', args, { timeout: 60000 });
     if (stderr) console.error('[verify_profile stderr]', stderr);
     console.log('[verify_profile stdout]', stdout.trim());
     const result = JSON.parse(stdout.trim());
     if (result.error) console.error('[verify_profile error]', result.error);
-    // If Python returned an error object, treat as unverifiable rather than crashing
     if (result.error || result.details === undefined) {
-      return { ownProfile: false, confidence: 0, details: {}, pythonError: result.error ?? 'no details returned' };
+      return { ownProfile: false, confidence: 0, details: {}, tagVerified: null, tagOcr: null, pythonError: result.error ?? 'no details returned' };
     }
     return result;
   } finally {
     await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
-}
-
-
-/**
- * Downloads the screenshot, runs Tesseract OCR on it, and checks whether
- * the expected player tag (e.g. "#2V89QJL8VY") appears anywhere in the text.
- * Returns { verified: bool, ocrText: string }
- */
-async function verifyTagInScreenshot(imageUrl, expectedTag) {
-  // Download image into a buffer
-  const resp = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 15000 });
-  const buffer = Buffer.from(resp.data);
-
-  // Run OCR — eng language, PSM 11 (sparse text, good for UI screens)
-  const { data: { text } } = await Tesseract.recognize(buffer, 'eng', {
-    tessedit_pageseg_mode: '11',
-  });
-
-  // Normalise both strings: uppercase, strip spaces, keep only alphanum and #
-  const normalise = s => s.toUpperCase().replace(/[^A-Z0-9#]/g, '');
-  const normText  = normalise(text);
-  const normTag   = normalise(expectedTag.startsWith('#') ? expectedTag : `#${expectedTag}`);
-
-  return { verified: normText.includes(normTag), ocrText: text.trim() };
 }
 
 
@@ -357,8 +332,8 @@ discord.on('interactionCreate', async interaction => {
       const apiKey     = interaction.options.getString('apikey');
       const screenshot = interaction.options.getAttachment('screenshot');
 
-      // ── Step 1: OpenCV — confirm screenshot is the user's own profile ─────────
-      const cvResult = await verifyOwnProfile(screenshot.url);
+      // ── Step 1: OpenCV + OCR — confirm own profile AND tag in one Python call ──
+      const cvResult = await verifyOwnProfile(screenshot.url, tag);
 
       if (!cvResult.ownProfile) {
         const detailLines = Object.entries(cvResult.details).map(([k, v]) => {
@@ -383,16 +358,14 @@ discord.on('interactionCreate', async interaction => {
         });
       }
 
-      // ── Step 2: OCR — confirm the claimed tag appears in the screenshot ───────
-      const { verified } = await verifyTagInScreenshot(screenshot.url, tag);
-
-      if (!verified) {
+      if (!cvResult.tagVerified) {
         return await interaction.editReply({
           embeds: [new EmbedBuilder()
             .setColor(0xe74c3c)
             .setTitle('❌  Tag Mismatch')
             .setDescription(
               `The screenshot passed the own-profile check ✅ but the tag \`${tag}\` was **not found** in the image.\n\n` +
+              `OCR read: \`${cvResult.tagOcr || 'nothing'}\`\n\n` +
               `**Make sure:**\n` +
               `• The tag you entered matches exactly what's visible in the screenshot\n` +
               `• The \`#TAG\` isn't cropped out of frame\n` +
@@ -402,7 +375,7 @@ discord.on('interactionCreate', async interaction => {
         });
       }
 
-      // ── Step 3: Fetch stats from the official API ─────────────────────────────
+      // ── Step 2: Fetch stats from the official API ─────────────────────────────
       const player = await fetchBrawlStarsAPI(tag, apiKey);
 
       // ── Step 4: Assign roles ──────────────────────────────────────────────────
