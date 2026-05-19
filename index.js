@@ -136,10 +136,19 @@ async function registerCommands() {
 }
 
 // ── Official Brawl Stars API ──────────────────────────────────────────────────
+// After
+const { HttpsProxyAgent } = require('https-proxy-agent');
+
+const proxyAgent = new HttpsProxyAgent(
+  `https://${process.env.DECODO_USER}:${process.env.DECODO_PASS}@isp.decodo.com:${process.env.DECODO_PORT}`
+);
+
 async function fetchBrawlStarsAPI(tag, apiKey) {
   const encoded = encodeURIComponent(tag.startsWith('#') ? tag : `#${tag}`);
   const resp = await axios.get(`https://api.brawlstars.com/v1/players/${encoded}`, {
-    headers: { Authorization: `Bearer ${apiKey}` }, timeout: 8000
+    headers: { Authorization: `Bearer ${apiKey}` },
+    httpsAgent: proxyAgent,
+    timeout: 8000,
   });
   return resp.data;
 }
