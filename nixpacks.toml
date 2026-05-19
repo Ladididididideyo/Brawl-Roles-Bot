@@ -1,5 +1,0 @@
-[build]
-nixpkgs = ["nodejs", "python311"]
-
-[start]
-cmd = "node index.js"
